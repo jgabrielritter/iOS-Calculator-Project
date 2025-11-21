@@ -6,99 +6,133 @@
 //
 
 import SwiftUI
+import UIKit
 
-// The main ContentView struct, representing the calculator screen
 struct ContentView: View {
-    // State variables to track various aspects of the calculator
-    @State private var displayText: String = "0" // Displayed text on the calculator
-    @State private var currentInput: String = "" // Current user input
-    @State private var tokens: [ExpressionToken] = [] // The expression being built
-    @State private var history: [String] = [] // Keep track of the calculation history
-    @State private var isDarkMode: Bool = false // Flag to toggle dark mode
+    @StateObject private var viewModel = CalculatorViewModel()
+    @State private var isDarkMode: Bool = false
 
-    @State private var isHistorySheetPresented: Bool = false // Flag to present the history sheet
-    @State private var alertMessage: AlertMessage? // Error message to present in an alert
-
-    // 2D array representing the layout of buttons on the calculator
-    let buttons: [[CalculatorButton]] = [
-        [.digit(7), .digit(8), .digit(9), .op(.divide)],
-        [.digit(4), .digit(5), .digit(6), .op(.multiply)],
-        [.digit(1), .digit(2), .digit(3), .op(.subtract)],
-        [.digit(0), .dot, .op(.add)],
-        [.clear, .equal, .history] // Added equal button
-    ]
-
-    // The body of the ContentView
     var body: some View {
-        VStack(spacing: 12) {
-            // Dark mode toggle button
-            HStack {
-                Spacer()
-                Button(action: {
-                    // Toggle dark mode
-                    withAnimation {
-                        isDarkMode.toggle()
-                    }
-                }) {
-                    Image(systemName: isDarkMode ? "sun.max" : "moon")
-                        .resizable()
-                        .frame(width: 20, height: 20)
-                        .foregroundColor(isDarkMode ? .white : .black)
-                        .padding()
-                }
-                .accessibilityLabel(isDarkMode ? "Disable dark mode" : "Enable dark mode")
-                .accessibilityHint("Toggles the calculator appearance")
-            }
+        VStack(spacing: 16) {
+            header
 
             Spacer()
 
-            // Display area for the calculator
-            VStack(alignment: .trailing, spacing: 8) {
-                Text(equationText)
-                    .font(.system(size: 20))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                    .accessibilityLabel("Equation")
-                    .accessibilityHint("Shows the full expression")
+            display
 
-                Text(displayText)
-                    .font(.system(size: 64))
-                    .padding(.horizontal)
+            if let error = viewModel.errorMessage {
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundColor(.red)
                     .frame(maxWidth: .infinity, alignment: .trailing)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                    .foregroundColor(isDarkMode ? .white : .black)
-                    .accessibilityLabel("Display")
-                    .accessibilityHint("Shows the current number or result")
+                    .transition(.opacity)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal)
 
-            // Grid of calculator buttons
-            VStack(spacing: 8) {
-                ForEach(buttons, id: \.self) { row in
-                    HStack(spacing: 8) {
-                        ForEach(row, id: \.self) { button in
-                            CalculatorButtonView(button: button, onTap: buttonPressed(_:))
-                        }
+            buttonGrid
+        }
+        .padding()
+        .background(backgroundColor)
+        .environment(.colorScheme, isDarkMode ? .dark : .light)
+    }
+
+    private var header: some View {
+        HStack {
+            Spacer()
+            Button(action: {
+                withAnimation { isDarkMode.toggle() }
+            }) {
+                Image(systemName: isDarkMode ? "sun.max" : "moon")
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                    .foregroundColor(isDarkMode ? .white : .black)
+                    .padding()
+            }
+            .accessibilityLabel(isDarkMode ? "Disable dark mode" : "Enable dark mode")
+            .accessibilityHint("Toggles the calculator appearance")
+        }
+    }
+
+    private var display: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Text(viewModel.equationText)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.6)
+                .accessibilityLabel("Equation")
+                .accessibilityHint("Shows the full expression")
+
+            Text(viewModel.displayText)
+                .font(.system(size: 64, weight: .bold, design: .rounded))
+                .padding(.horizontal)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.4)
+                .foregroundColor(isDarkMode ? .white : .black)
+                .accessibilityLabel("Display")
+                .accessibilityHint("Shows the current number or result")
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal)
+    }
+
+    private var buttonGrid: some View {
+        VStack(spacing: 8) {
+            ForEach(Array(CalculatorButton.allRows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 8) {
+                    ForEach(row, id: \.self) { button in
+                        CalculatorButtonView(button: button, onTap: { viewModel.handle(button) })
                     }
                 }
             }
         }
-        .padding()
-        .background(backgroundColor)
-        .sheet(isPresented: $isHistorySheetPresented) {
-            HistoryView(history: self.history)
+        .sheet(isPresented: $viewModel.isShowingHistory) {
+            HistoryView(
+                history: viewModel.history,
+                onSelect: { entry in
+                    viewModel.useHistoryEntry(entry)
+                    viewModel.isShowingHistory = false
+                },
+                onDelete: { indexSet in
+                    viewModel.deleteHistory(at: indexSet)
+                }
+            )
         }
-        .alert(item: $alertMessage, content: { message in
-            Alert(title: Text("Error"), message: Text(message.text), dismissButton: .default(Text("OK")))
-        })
-        .environment(.colorScheme, isDarkMode ? .dark : .light)
     }
 
-    // Function to handle button presses
-    func buttonPressed(_ button: CalculatorButton) {
+    private var backgroundColor: Color {
+        isDarkMode ? .black : .white
+    }
+}
+
+// MARK: - View Model
+
+final class CalculatorViewModel: ObservableObject {
+    @Published private(set) var displayText: String = "0"
+    @Published private(set) var equationText: String = ""
+    @Published private(set) var history: [HistoryEntry] = []
+    @Published var errorMessage: String?
+    @Published var isShowingHistory: Bool = false
+
+    private var currentInput: String = ""
+    private var tokens: [ExpressionToken] = []
+    private let formatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.locale = .current
+        formatter.maximumFractionDigits = 8
+        formatter.minimumFractionDigits = 0
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
+
+    init() {
+        loadHistory()
+    }
+
+    func handle(_ button: CalculatorButton) {
+        provideHapticFeedback()
+        errorMessage = nil
+
         switch button {
         case .digit(let value):
             handleDigit(value)
@@ -111,121 +145,117 @@ struct ContentView: View {
         case .clear:
             clearCalculator()
         case .history:
-            showHistory()
+            isShowingHistory.toggle()
+        case .toggleSign:
+            toggleSign()
+        case .percent:
+            applyPercent()
+        case .backspace:
+            backspace()
         }
-    }
 
-    // Function to handle digit input
-    func handleDigit(_ digit: Int) {
-        currentInput.append(String(digit))
+        updateEquationText()
         updateDisplay()
     }
 
-    // Function to handle dot (decimal point) input
-    func handleDot() {
+    func useHistoryEntry(_ entry: HistoryEntry) {
+        currentInput = formattedNumber(entry.result)
+        tokens = [.number(entry.result)]
+        updateEquationText()
+        updateDisplay()
+    }
+
+    func deleteHistory(at indexSet: IndexSet) {
+        history.remove(atOffsets: indexSet)
+        saveHistory()
+    }
+
+    // MARK: - Input Handlers
+
+    private func handleDigit(_ digit: Int) {
+        currentInput.append(String(digit))
+    }
+
+    private func handleDot() {
         if !currentInput.contains(".") {
-            if currentInput.isEmpty {
-                currentInput = "0"
-            }
+            if currentInput.isEmpty { currentInput = "0" }
             currentInput.append(".")
-            updateDisplay()
         }
     }
 
-    // Function to handle binary operator input
-    func handleOperator(_ operatorType: OperatorType) {
-        if !commitCurrentInput() && tokens.isEmpty {
-            alertMessage = AlertMessage(text: "Enter a number before selecting an operator.")
+    private func handleOperator(_ operatorType: OperatorType) {
+        guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
+            errorMessage = "Enter a number before selecting an operator."
             return
         }
 
-        if let last = tokens.last, case .operator = last {
-            tokens.removeLast()
-        }
-
+        if let last = tokens.last, case .operator = last { tokens.removeLast() }
         tokens.append(.operator(operatorType))
-        currentInput = ""
-        updateDisplay()
     }
 
-    // Function to calculate the result of the expression
-    func calculateResult() {
+    private func calculateResult() {
         guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
-            alertMessage = AlertMessage(text: "Complete the expression before calculating.")
+            errorMessage = "Complete the expression before calculating."
             return
         }
 
         guard tokens.containsNumber else {
-            alertMessage = AlertMessage(text: "Enter a number to calculate.")
+            errorMessage = "Enter a number to calculate."
             return
         }
 
-        let expressionString = equationText
         switch evaluateTokens(tokens) {
         case .success(let value):
-            displayText = formattedNumber(value)
-            history.append("\(expressionString) = \(displayText)")
+            let formatted = formattedNumber(value)
+            displayText = formatted
+            let expressionString = equationText
+            let entry = HistoryEntry(expression: expressionString, result: value, timestamp: Date())
+            history.insert(entry, at: 0)
+            saveHistory()
             tokens = [.number(value)]
             currentInput = ""
-            updateDisplay()
         case .failure(let error):
-            alertMessage = AlertMessage(text: error)
-            resetCalculator()
+            errorMessage = error
         }
     }
 
-    // Function to clear the calculator
-    func clearCalculator() {
+    private func clearCalculator() {
         currentInput = ""
         tokens = []
-        displayText = "0"
+        errorMessage = nil
     }
 
-    // Function to reset the calculator
-    func resetCalculator() {
-        currentInput = ""
-        tokens = []
-        displayText = "0"
-    }
-
-    // Function to show the calculation history sheet
-    func showHistory() {
-        isHistorySheetPresented.toggle()
-    }
-
-    // Function to determine the background color based on dark mode
-    var backgroundColor: Color {
-        if isDarkMode {
-            return Color.black
-        } else {
-            return Color.white
+    private func toggleSign() {
+        if currentInput.isEmpty, let lastNumber = tokens.lastNumber {
+            currentInput = formattedNumber(-lastNumber)
+            tokens.removeLast()
+        } else if let value = Double(currentInput) {
+            currentInput = formattedNumber(-value)
         }
     }
 
-    // Computed property representing the full equation as text
-    var equationText: String {
-        var parts: [String] = tokens.map { token in
-            switch token {
-            case .number(let value):
-                return formattedNumber(value)
-            case .operator(let op):
-                return op.rawValue
-            }
+    private func applyPercent() {
+        if currentInput.isEmpty, let lastNumber = tokens.lastNumber {
+            currentInput = formattedNumber(lastNumber / 100)
+            tokens.removeLast()
+        } else if let value = Double(currentInput) {
+            currentInput = formattedNumber(value / 100)
         }
-
-        if !currentInput.isEmpty {
-            parts.append(currentInput)
-        }
-
-        return parts.isEmpty ? "" : parts.joined(separator: " ")
     }
 
-    // Commit the current input as a number token
+    private func backspace() {
+        guard !currentInput.isEmpty else { return }
+        currentInput.removeLast()
+        if currentInput.isEmpty { currentInput = "" }
+    }
+
+    // MARK: - Helpers
+
     @discardableResult
-    func commitCurrentInput() -> Bool {
+    private func commitCurrentInput() -> Bool {
         guard !currentInput.isEmpty else { return false }
         guard let value = Double(currentInput) else {
-            alertMessage = AlertMessage(text: "Invalid number format.")
+            errorMessage = "Invalid number format."
             return false
         }
 
@@ -234,8 +264,7 @@ struct ContentView: View {
         return true
     }
 
-    // Update the displayed text based on equation and current input
-    func updateDisplay() {
+    private func updateDisplay() {
         if !currentInput.isEmpty {
             displayText = currentInput
         } else if let lastNumber = tokens.lastNumber {
@@ -245,11 +274,23 @@ struct ContentView: View {
         }
     }
 
-    // Evaluate expression tokens with basic operator precedence
-    func evaluateTokens(_ tokens: [ExpressionToken]) -> Result<Double, String> {
+    private func updateEquationText() {
+        var parts: [String] = tokens.map { token in
+            switch token {
+            case .number(let value):
+                return formattedNumber(value)
+            case .operator(let op):
+                return op.rawValue
+            }
+        }
+
+        if !currentInput.isEmpty { parts.append(currentInput) }
+        equationText = parts.joined(separator: " ")
+    }
+
+    private func evaluateTokens(_ tokens: [ExpressionToken]) -> Result<Double, String> {
         var workingTokens = tokens
 
-        // Validate alternating number/operator pattern
         for index in 0..<workingTokens.count {
             let isEven = index % 2 == 0
             let token = workingTokens[index]
@@ -261,12 +302,10 @@ struct ContentView: View {
             }
         }
 
-        // Ensure expression ends with number
         if let last = workingTokens.last, case .operator = last {
             return .failure("Expression cannot end with an operator.")
         }
 
-        // First handle multiplication and division
         var reducedTokens: [ExpressionToken] = []
         var index = 0
 
@@ -298,7 +337,6 @@ struct ContentView: View {
             }
         }
 
-        // Then handle addition and subtraction
         guard let firstNumberToken = reducedTokens.first, case .number(let first) = firstNumberToken else {
             return .failure("Invalid expression.")
         }
@@ -316,7 +354,6 @@ struct ContentView: View {
             case .subtract:
                 result -= rhs
             case .multiply, .divide:
-                // Already handled in previous pass
                 break
             }
 
@@ -326,29 +363,62 @@ struct ContentView: View {
         return .success(result)
     }
 
-    // Format numbers to avoid trailing zeros
-    func formattedNumber(_ value: Double) -> String {
-        if value.truncatingRemainder(dividingBy: 1) == 0 {
-            return String(Int(value))
+    private func formattedNumber(_ value: Double) -> String {
+        formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
+    private func provideHapticFeedback() {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        generator.impactOccurred()
+    }
+
+    // MARK: - Persistence
+
+    private func saveHistory() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(history) {
+            UserDefaults.standard.set(data, forKey: "calculatorHistory")
         }
-        return String(value)
+    }
+
+    private func loadHistory() {
+        guard let data = UserDefaults.standard.data(forKey: "calculatorHistory") else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let saved = try? decoder.decode([HistoryEntry].self, from: data) {
+            history = saved
+        }
     }
 }
 
-// Subview representing an individual calculator button
+// MARK: - Supporting Types
+
+struct HistoryEntry: Identifiable, Codable, Hashable {
+    let id: UUID = UUID()
+    let expression: String
+    let result: Double
+    let timestamp: Date
+
+    var formattedTimestamp: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: timestamp)
+    }
+}
+
 struct CalculatorButtonView: View {
     let button: CalculatorButton
     let onTap: (CalculatorButton) -> Void
 
     @Environment(\.colorScheme) var colorScheme
 
-    // The body of the CalculatorButtonView
     var body: some View {
-        Button(action: {
-            self.onTap(self.button)
-        }) {
+        Button(action: { onTap(button) }) {
             Text(button.title)
-                .font(.system(size: 24))
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
                 .frame(minWidth: 64, maxWidth: .infinity, minHeight: 64, maxHeight: .infinity)
                 .padding(.vertical, 8)
                 .background(buttonBackgroundColor)
@@ -362,32 +432,43 @@ struct CalculatorButtonView: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    // Function to determine the button background color based on dark mode
-    var buttonBackgroundColor: Color {
-        if colorScheme == .dark {
-            return Color.gray.opacity(0.5)
-        } else {
-            return Color.gray.opacity(0.2)
-        }
+    private var buttonBackgroundColor: Color {
+        colorScheme == .dark ? Color.gray.opacity(0.5) : Color.gray.opacity(0.2)
     }
 }
 
-// Subview representing the history view
 struct HistoryView: View {
     @Environment(\.presentationMode) var presentationMode
-    var history: [String]
+    var history: [HistoryEntry]
+    var onSelect: (HistoryEntry) -> Void
+    var onDelete: (IndexSet) -> Void
 
-    // The body of the HistoryView
     var body: some View {
         NavigationView {
-            List(history, id: \.self) { entry in
-                Text(entry)
+            List {
+                ForEach(history) { entry in
+                    Button(action: { onSelect(entry) }) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(entry.expression)
+                                .font(.body)
+                            Text("= \(entry.resultFormatted)")
+                                .font(.headline)
+                            Text(entry.formattedTimestamp)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     .accessibilityLabel("Past calculation")
+                    .accessibilityHint("Tap to reuse this result")
+                }
+                .onDelete(perform: onDelete)
             }
             .navigationBarTitle("History", displayMode: .inline)
             .navigationBarItems(trailing: Button("Close") {
-                // Dismiss the sheet
-                self.presentationMode.wrappedValue.dismiss()
+                presentationMode.wrappedValue.dismiss()
             }
             .accessibilityLabel("Close history")
             .accessibilityHint("Dismisses the history list"))
@@ -395,7 +476,6 @@ struct HistoryView: View {
     }
 }
 
-// Enum representing the types of calculator buttons
 enum CalculatorButton: Hashable {
     case digit(Int)
     case dot
@@ -403,8 +483,19 @@ enum CalculatorButton: Hashable {
     case equal
     case clear
     case history
+    case toggleSign
+    case percent
+    case backspace
 
-    // Computed property to get the title of the button
+    static let allRows: [[CalculatorButton]] = [
+        [.clear, .toggleSign, .percent, .backspace],
+        [.digit(7), .digit(8), .digit(9), .op(.divide)],
+        [.digit(4), .digit(5), .digit(6), .op(.multiply)],
+        [.digit(1), .digit(2), .digit(3), .op(.subtract)],
+        [.digit(0), .dot, .history, .op(.add)],
+        [.equal]
+    ]
+
     var title: String {
         switch self {
         case .digit(let value):
@@ -419,6 +510,12 @@ enum CalculatorButton: Hashable {
             return "C"
         case .history:
             return "History"
+        case .toggleSign:
+            return "+/−"
+        case .percent:
+            return "%"
+        case .backspace:
+            return "⌫"
         }
     }
 
@@ -436,6 +533,12 @@ enum CalculatorButton: Hashable {
             return "Clear calculator"
         case .history:
             return "Show history"
+        case .toggleSign:
+            return "Toggle sign"
+        case .percent:
+            return "Percent"
+        case .backspace:
+            return "Delete last character"
         }
     }
 
@@ -451,11 +554,16 @@ enum CalculatorButton: Hashable {
             return "Resets the calculator"
         case .history:
             return "Opens the history list"
+        case .toggleSign:
+            return "Switches between positive and negative"
+        case .percent:
+            return "Converts the number to a percent"
+        case .backspace:
+            return "Removes the last digit"
         }
     }
 }
 
-// Enum representing the types of binary operators
 enum OperatorType: String {
     case add = "+"
     case subtract = "-"
@@ -476,7 +584,6 @@ enum OperatorType: String {
     }
 }
 
-// Expression token representing either a number or an operator
 enum ExpressionToken: Equatable {
     case number(Double)
     case `operator`(OperatorType)
@@ -498,12 +605,17 @@ private extension Array where Element == ExpressionToken {
     }
 }
 
-struct AlertMessage: Identifiable {
-    let id = UUID()
-    let text: String
+extension HistoryEntry {
+    var resultFormatted: String {
+        let formatter = NumberFormatter()
+        formatter.locale = .current
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 8
+        formatter.minimumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: result)) ?? String(result)
+    }
 }
 
-// PreviewProvider for the ContentView
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()

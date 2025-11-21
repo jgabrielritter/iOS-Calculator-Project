@@ -10,15 +10,14 @@ import SwiftUI
 // The main ContentView struct, representing the calculator screen
 struct ContentView: View {
     // State variables to track various aspects of the calculator
-    @State private var displayText: String = "" // Displayed text on the calculator
+    @State private var displayText: String = "0" // Displayed text on the calculator
     @State private var currentInput: String = "" // Current user input
-    @State private var equation: String = "" // The entire equation being built
-    @State private var firstOperand: Double? // The first operand in a binary operation
-    @State private var currentOperator: OperatorType? // The current binary operator
+    @State private var tokens: [ExpressionToken] = [] // The expression being built
     @State private var history: [String] = [] // Keep track of the calculation history
     @State private var isDarkMode: Bool = false // Flag to toggle dark mode
 
     @State private var isHistorySheetPresented: Bool = false // Flag to present the history sheet
+    @State private var alertMessage: AlertMessage? // Error message to present in an alert
 
     // 2D array representing the layout of buttons on the calculator
     let buttons: [[CalculatorButton]] = [
@@ -47,17 +46,34 @@ struct ContentView: View {
                         .foregroundColor(isDarkMode ? .white : .black)
                         .padding()
                 }
+                .accessibilityLabel(isDarkMode ? "Disable dark mode" : "Enable dark mode")
+                .accessibilityHint("Toggles the calculator appearance")
             }
 
             Spacer()
 
             // Display area for the calculator
-            Text(displayText)
-                .font(.system(size: 64))
-                .padding()
-                .frame(width: 300, height: 80, alignment: .trailing)
-                .lineLimit(1)
-                .foregroundColor(isDarkMode ? .white : .black)
+            VStack(alignment: .trailing, spacing: 8) {
+                Text(equationText)
+                    .font(.system(size: 20))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .accessibilityLabel("Equation")
+                    .accessibilityHint("Shows the full expression")
+
+                Text(displayText)
+                    .font(.system(size: 64))
+                    .padding(.horizontal)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .foregroundColor(isDarkMode ? .white : .black)
+                    .accessibilityLabel("Display")
+                    .accessibilityHint("Shows the current number or result")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal)
 
             // Grid of calculator buttons
             VStack(spacing: 8) {
@@ -75,7 +91,10 @@ struct ContentView: View {
         .sheet(isPresented: $isHistorySheetPresented) {
             HistoryView(history: self.history)
         }
-        .environment(\.colorScheme, isDarkMode ? .dark : .light)
+        .alert(item: $alertMessage, content: { message in
+            Alert(title: Text("Error"), message: Text(message.text), dismissButton: .default(Text("OK")))
+        })
+        .environment(.colorScheme, isDarkMode ? .dark : .light)
     }
 
     // Function to handle button presses
@@ -99,108 +118,74 @@ struct ContentView: View {
     // Function to handle digit input
     func handleDigit(_ digit: Int) {
         currentInput.append(String(digit))
-        equation.append(String(digit))
-        displayText = equation
+        updateDisplay()
     }
 
     // Function to handle dot (decimal point) input
     func handleDot() {
         if !currentInput.contains(".") {
+            if currentInput.isEmpty {
+                currentInput = "0"
+            }
             currentInput.append(".")
-            equation.append(".")
-            displayText = equation
+            updateDisplay()
         }
     }
 
     // Function to handle binary operator input
     func handleOperator(_ operatorType: OperatorType) {
-        if let currentOperator = currentOperator, let currentOperand = Double(currentInput) {
-            // If there was a previous operator, perform the operation
-            switch currentOperator {
-            case .add:
-                firstOperand! += currentOperand
-            case .subtract:
-                firstOperand! -= currentOperand
-            case .multiply:
-                firstOperand! *= currentOperand
-            case .divide:
-                if currentOperand != 0 {
-                    firstOperand! /= currentOperand
-                } else {
-                    // Handle division by zero
-                    // For simplicity, we reset the calculator
-                    resetCalculator()
-                    return
-                }
-            }
-        } else {
-            // If there was no previous operator, set the current display value as the first operand
-            firstOperand = Double(currentInput)
+        if !commitCurrentInput() && tokens.isEmpty {
+            alertMessage = AlertMessage(text: "Enter a number before selecting an operator.")
+            return
         }
 
-        // Update the operator, equation, and reset the current input
-        currentOperator = operatorType
-        equation.append(" \(currentOperator!.rawValue) ")
-        currentInput = ""
+        if let last = tokens.last, case .operator = last {
+            tokens.removeLast()
+        }
 
-        // Update the display with the entire equation
-        displayText = equation
+        tokens.append(.operator(operatorType))
+        currentInput = ""
+        updateDisplay()
     }
 
     // Function to calculate the result of the expression
     func calculateResult() {
-        guard let currentOperator = currentOperator, let currentOperand = Double(currentInput) else {
+        guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
+            alertMessage = AlertMessage(text: "Complete the expression before calculating.")
             return
         }
 
-        // Perform the final operation
-        switch currentOperator {
-        case .add:
-            firstOperand! += currentOperand
-        case .subtract:
-            firstOperand! -= currentOperand
-        case .multiply:
-            firstOperand! *= currentOperand
-        case .divide:
-            if currentOperand != 0 {
-                firstOperand! /= currentOperand
-            } else {
-                // Handle division by zero
-                resetCalculator()
-                return
-            }
+        guard tokens.containsNumber else {
+            alertMessage = AlertMessage(text: "Enter a number to calculate.")
+            return
         }
 
-        // Display the answer in the output
-        displayText = String(firstOperand!)
-
-        // Add the entire equation and result to history
-        addToHistory("\(equation) = \(displayText)")
-
-        // Reset the calculator after calculating the result
-        resetCalculator()
+        let expressionString = equationText
+        switch evaluateTokens(tokens) {
+        case .success(let value):
+            displayText = formattedNumber(value)
+            history.append("\(expressionString) = \(displayText)")
+            tokens = [.number(value)]
+            currentInput = ""
+            updateDisplay()
+        case .failure(let error):
+            alertMessage = AlertMessage(text: error)
+            resetCalculator()
+        }
     }
 
     // Function to clear the calculator
     func clearCalculator() {
         currentInput = ""
-        equation = ""
-        displayText = ""
-        firstOperand = nil
-        currentOperator = nil
+        tokens = []
+        displayText = "0"
     }
 
     // Function to reset the calculator
     func resetCalculator() {
         currentInput = ""
-        equation = ""
-        firstOperand = nil
-        currentOperator = nil
-    }
-
-    // Function to add an entry to the calculation history
-    func addToHistory(_ entry: String) {
-        history.append(entry)
+        tokens = []
+        displayText = "0"
     }
 
     // Function to show the calculation history sheet
@@ -215,6 +200,138 @@ struct ContentView: View {
         } else {
             return Color.white
         }
+    }
+
+    // Computed property representing the full equation as text
+    var equationText: String {
+        var parts: [String] = tokens.map { token in
+            switch token {
+            case .number(let value):
+                return formattedNumber(value)
+            case .operator(let op):
+                return op.rawValue
+            }
+        }
+
+        if !currentInput.isEmpty {
+            parts.append(currentInput)
+        }
+
+        return parts.isEmpty ? "" : parts.joined(separator: " ")
+    }
+
+    // Commit the current input as a number token
+    @discardableResult
+    func commitCurrentInput() -> Bool {
+        guard !currentInput.isEmpty else { return false }
+        guard let value = Double(currentInput) else {
+            alertMessage = AlertMessage(text: "Invalid number format.")
+            return false
+        }
+
+        tokens.append(.number(value))
+        currentInput = ""
+        return true
+    }
+
+    // Update the displayed text based on equation and current input
+    func updateDisplay() {
+        if !currentInput.isEmpty {
+            displayText = currentInput
+        } else if let lastNumber = tokens.lastNumber {
+            displayText = formattedNumber(lastNumber)
+        } else {
+            displayText = "0"
+        }
+    }
+
+    // Evaluate expression tokens with basic operator precedence
+    func evaluateTokens(_ tokens: [ExpressionToken]) -> Result<Double, String> {
+        var workingTokens = tokens
+
+        // Validate alternating number/operator pattern
+        for index in 0..<workingTokens.count {
+            let isEven = index % 2 == 0
+            let token = workingTokens[index]
+            if isEven, case .operator = token {
+                return .failure("Expression cannot start with an operator.")
+            }
+            if !isEven, case .number = token {
+                return .failure("Operators must be between numbers.")
+            }
+        }
+
+        // Ensure expression ends with number
+        if let last = workingTokens.last, case .operator = last {
+            return .failure("Expression cannot end with an operator.")
+        }
+
+        // First handle multiplication and division
+        var reducedTokens: [ExpressionToken] = []
+        var index = 0
+
+        while index < workingTokens.count {
+            let token = workingTokens[index]
+            switch token {
+            case .number:
+                reducedTokens.append(token)
+                index += 1
+            case .operator(let op) where (op == .multiply || op == .divide):
+                guard let lastNumberToken = reducedTokens.popLast(), case .number(let lhs) = lastNumberToken else {
+                    return .failure("Invalid expression structure.")
+                }
+
+                guard index + 1 < workingTokens.count, case .number(let rhs) = workingTokens[index + 1] else {
+                    return .failure("Operator must be followed by a number.")
+                }
+
+                if op == .divide && rhs == 0 {
+                    return .failure("Cannot divide by zero.")
+                }
+
+                let result = op == .multiply ? lhs * rhs : lhs / rhs
+                reducedTokens.append(.number(result))
+                index += 2
+            case .operator:
+                reducedTokens.append(token)
+                index += 1
+            }
+        }
+
+        // Then handle addition and subtraction
+        guard let firstNumberToken = reducedTokens.first, case .number(let first) = firstNumberToken else {
+            return .failure("Invalid expression.")
+        }
+
+        var result = first
+        index = 1
+        while index < reducedTokens.count - 1 {
+            guard case .operator(let op) = reducedTokens[index], case .number(let rhs) = reducedTokens[index + 1] else {
+                return .failure("Invalid expression.")
+            }
+
+            switch op {
+            case .add:
+                result += rhs
+            case .subtract:
+                result -= rhs
+            case .multiply, .divide:
+                // Already handled in previous pass
+                break
+            }
+
+            index += 2
+        }
+
+        return .success(result)
+    }
+
+    // Format numbers to avoid trailing zeros
+    func formattedNumber(_ value: Double) -> String {
+        if value.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(Int(value))
+        }
+        return String(value)
     }
 }
 
@@ -232,10 +349,17 @@ struct CalculatorButtonView: View {
         }) {
             Text(button.title)
                 .font(.system(size: 24))
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                .frame(minWidth: 64, maxWidth: .infinity, minHeight: 64, maxHeight: .infinity)
+                .padding(.vertical, 8)
                 .background(buttonBackgroundColor)
-                .cornerRadius(8)
+                .cornerRadius(10)
+                .foregroundColor(colorScheme == .dark ? .white : .primary)
+                .minimumScaleFactor(0.8)
         }
+        .contentShape(Rectangle())
+        .accessibilityLabel(button.accessibilityLabel)
+        .accessibilityHint(button.accessibilityHint)
+        .accessibilityAddTraits(.isButton)
     }
 
     // Function to determine the button background color based on dark mode
@@ -258,12 +382,15 @@ struct HistoryView: View {
         NavigationView {
             List(history, id: \.self) { entry in
                 Text(entry)
+                    .accessibilityLabel("Past calculation")
             }
             .navigationBarTitle("History", displayMode: .inline)
             .navigationBarItems(trailing: Button("Close") {
                 // Dismiss the sheet
                 self.presentationMode.wrappedValue.dismiss()
-            })
+            }
+            .accessibilityLabel("Close history")
+            .accessibilityHint("Dismisses the history list"))
         }
     }
 }
@@ -294,6 +421,38 @@ enum CalculatorButton: Hashable {
             return "History"
         }
     }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .digit(let value):
+            return "Digit \(value)"
+        case .dot:
+            return "Decimal point"
+        case .op(let op):
+            return op.accessibilityLabel
+        case .equal:
+            return "Calculate result"
+        case .clear:
+            return "Clear calculator"
+        case .history:
+            return "Show history"
+        }
+    }
+
+    var accessibilityHint: String {
+        switch self {
+        case .digit, .dot:
+            return "Adds to the current number"
+        case .op:
+            return "Sets the operator"
+        case .equal:
+            return "Evaluates the current expression"
+        case .clear:
+            return "Resets the calculator"
+        case .history:
+            return "Opens the history list"
+        }
+    }
 }
 
 // Enum representing the types of binary operators
@@ -302,6 +461,46 @@ enum OperatorType: String {
     case subtract = "-"
     case multiply = "×"
     case divide = "÷"
+
+    var accessibilityLabel: String {
+        switch self {
+        case .add:
+            return "Add"
+        case .subtract:
+            return "Subtract"
+        case .multiply:
+            return "Multiply"
+        case .divide:
+            return "Divide"
+        }
+    }
+}
+
+// Expression token representing either a number or an operator
+enum ExpressionToken: Equatable {
+    case number(Double)
+    case `operator`(OperatorType)
+}
+
+private extension Array where Element == ExpressionToken {
+    var lastNumber: Double? {
+        for token in reversed() {
+            if case .number(let value) = token { return value }
+        }
+        return nil
+    }
+
+    var containsNumber: Bool {
+        contains { token in
+            if case .number = token { return true }
+            return false
+        }
+    }
+}
+
+struct AlertMessage: Identifiable {
+    let id = UUID()
+    let text: String
 }
 
 // PreviewProvider for the ContentView

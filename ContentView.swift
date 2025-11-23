@@ -11,6 +11,8 @@ import UIKit
 struct ContentView: View {
     @StateObject private var viewModel = CalculatorViewModel()
     @State private var isDarkMode: Bool = false
+    @State private var selectedTheme: ThemeOption = .classic
+    @State private var accentColor: Color = .orange
 
     var body: some View {
         VStack(spacing: 16) {
@@ -21,34 +23,66 @@ struct ContentView: View {
             display
 
             if let error = viewModel.errorMessage {
-                Text(error)
+                Text(LocalizedStringKey(error))
                     .font(.subheadline)
                     .foregroundColor(.red)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .transition(.opacity)
+                    .onTapGesture {
+                        withAnimation { viewModel.clearError() }
+                    }
+                    .accessibilityHint("Tap to dismiss the error and start fresh")
             }
 
             buttonGrid
         }
         .padding()
         .background(backgroundColor)
+        .accentColor(accentColor)
         .environment(.colorScheme, isDarkMode ? .dark : .light)
+        .onChange(of: selectedTheme) { newValue in
+            accentColor = newValue.accentColor
+        }
     }
 
     private var header: some View {
-        HStack {
-            Spacer()
-            Button(action: {
-                withAnimation { isDarkMode.toggle() }
-            }) {
-                Image(systemName: isDarkMode ? "sun.max" : "moon")
-                    .resizable()
-                    .frame(width: 20, height: 20)
-                    .foregroundColor(isDarkMode ? .white : .black)
-                    .padding()
+        VStack(alignment: .trailing, spacing: 8) {
+            HStack(spacing: 12) {
+                Picker("Theme", selection: $selectedTheme) {
+                    ForEach(ThemeOption.allCases, id: \.self) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Theme presets")
+                .accessibilityHint("Choose a visual style")
+
+                ColorPicker("Accent", selection: $accentColor, supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(width: 44, height: 44)
+                    .accessibilityLabel("Accent color picker")
             }
-            .accessibilityLabel(isDarkMode ? "Disable dark mode" : "Enable dark mode")
-            .accessibilityHint("Toggles the calculator appearance")
+
+            HStack {
+                Button(action: { withAnimation { isDarkMode.toggle() } }) {
+                    Image(systemName: isDarkMode ? "sun.max" : "moon")
+                        .resizable()
+                        .frame(width: 20, height: 20)
+                        .foregroundColor(isDarkMode ? .white : .black)
+                        .padding(8)
+                }
+                .accessibilityLabel(isDarkMode ? "Disable dark mode" : "Enable dark mode")
+                .accessibilityHint("Toggles the calculator appearance")
+
+                Spacer()
+
+                Button(action: { viewModel.isShowingHistory.toggle() }) {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                        .labelStyle(.titleAndIcon)
+                }
+                .padding(.horizontal)
+                .accessibilityHint("Opens your recent calculations")
+            }
         }
     }
 
@@ -71,18 +105,31 @@ struct ContentView: View {
                 .foregroundColor(isDarkMode ? .white : .black)
                 .accessibilityLabel("Display")
                 .accessibilityHint("Shows the current number or result")
+
+            if let memoryValue = viewModel.memoryValue {
+                Text("M: \(viewModel.formattedNumber(memoryValue))")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .accessibilityLabel("Memory value \(viewModel.formattedNumber(memoryValue))")
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal)
     }
 
     private var buttonGrid: some View {
-        VStack(spacing: 8) {
-            ForEach(Array(CalculatorButton.allRows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 8) {
-                    ForEach(row, id: \.self) { button in
-                        CalculatorButtonView(button: button, onTap: { viewModel.handle(button) })
-                    }
+        GeometryReader { proxy in
+            let columns = Array(repeating: GridItem(.flexible(minimum: 64, maximum: proxy.size.width / 4)), count: 4)
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(CalculatorButton.allButtons, id: \.self) { button in
+                    CalculatorButtonView(
+                        button: button,
+                        onTap: { viewModel.handle(button) },
+                        onLongPress: { longPressButton in
+                            viewModel.handleLongPress(for: longPressButton)
+                        }
+                    )
+                    .frame(height: max(64, proxy.size.height / 8))
                 }
             }
         }
@@ -95,6 +142,9 @@ struct ContentView: View {
                 },
                 onDelete: { indexSet in
                     viewModel.deleteHistory(at: indexSet)
+                },
+                onPinToggle: { entry in
+                    viewModel.togglePin(for: entry)
                 }
             )
         }
@@ -113,6 +163,7 @@ final class CalculatorViewModel: ObservableObject {
     @Published private(set) var history: [HistoryEntry] = []
     @Published var errorMessage: String?
     @Published var isShowingHistory: Bool = false
+    @Published var memoryValue: Double?
 
     private var currentInput: String = ""
     private var tokens: [ExpressionToken] = []
@@ -152,6 +203,12 @@ final class CalculatorViewModel: ObservableObject {
             applyPercent()
         case .backspace:
             backspace()
+        case .parenthesis(let side):
+            handleParenthesis(isLeft: side == .left)
+        case .function(let fn):
+            handleFunction(fn)
+        case .memory(let action):
+            handleMemory(action)
         }
 
         updateEquationText()
@@ -170,6 +227,17 @@ final class CalculatorViewModel: ObservableObject {
         saveHistory()
     }
 
+    func togglePin(for entry: HistoryEntry) {
+        if let index = history.firstIndex(of: entry) {
+            history[index].isPinned.toggle()
+            history.sort { lhs, rhs in
+                if lhs.isPinned == rhs.isPinned { return lhs.timestamp > rhs.timestamp }
+                return lhs.isPinned && !rhs.isPinned
+            }
+            saveHistory()
+        }
+    }
+
     // MARK: - Input Handlers
 
     private func handleDigit(_ digit: Int) {
@@ -186,6 +254,7 @@ final class CalculatorViewModel: ObservableObject {
     private func handleOperator(_ operatorType: OperatorType) {
         guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
             errorMessage = "Enter a number before selecting an operator."
+            provideHapticFeedback(isError: true)
             return
         }
 
@@ -196,6 +265,7 @@ final class CalculatorViewModel: ObservableObject {
     private func calculateResult() {
         guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
             errorMessage = "Complete the expression before calculating."
+            provideHapticFeedback(isError: true)
             return
         }
 
@@ -249,6 +319,95 @@ final class CalculatorViewModel: ObservableObject {
         if currentInput.isEmpty { currentInput = "" }
     }
 
+    private func handleParenthesis(isLeft: Bool) {
+        if isLeft {
+            tokens.append(.parenthesis(.left))
+        } else {
+            let openCount = tokens.filter { if case .parenthesis(.left) = $0 { return true } else { return false } }.count
+            let closeCount = tokens.filter { if case .parenthesis(.right) = $0 { return true } else { return false } }.count
+            guard openCount > closeCount else {
+                errorMessage = "No matching '(' found."
+                provideHapticFeedback(isError: true)
+                return
+            }
+            guard commitCurrentInput() || (!tokens.isEmpty && currentInput.isEmpty) else {
+                errorMessage = "Add a number before closing the parenthesis."
+                return
+            }
+            tokens.append(.parenthesis(.right))
+        }
+    }
+
+    private func handleFunction(_ function: FunctionType) {
+        let value: Double?
+        if !currentInput.isEmpty, let current = Double(currentInput) {
+            value = current
+        } else {
+            value = tokens.lastNumber
+            if value != nil { tokens.removeLast() }
+        }
+
+        guard let operand = value else {
+            errorMessage = "Enter a number before applying a function."
+            provideHapticFeedback(isError: true)
+            return
+        }
+
+        let result: Double?
+        switch function {
+        case .sin: result = sin(operand)
+        case .cos: result = cos(operand)
+        case .tan: result = tan(operand)
+        case .sqrt: result = operand >= 0 ? sqrt(operand) : nil
+        case .square: result = pow(operand, 2)
+        case .reciprocal: result = operand != 0 ? 1 / operand : nil
+        }
+
+        guard let valueResult = result else {
+            errorMessage = "Invalid input for \(function.title)."
+            provideHapticFeedback(isError: true)
+            return
+        }
+
+        currentInput = formattedNumber(valueResult)
+    }
+
+    private func handleMemory(_ action: MemoryAction) {
+        switch action {
+        case .mc:
+            memoryValue = nil
+        case .mr:
+            if let memoryValue {
+                currentInput = formattedNumber(memoryValue)
+            }
+        case .mPlus:
+            let value = Double(currentInput) ?? tokens.lastNumber ?? 0
+            memoryValue = (memoryValue ?? 0) + value
+        case .mMinus:
+            let value = Double(currentInput) ?? tokens.lastNumber ?? 0
+            memoryValue = (memoryValue ?? 0) - value
+        }
+    }
+
+    func handleLongPress(for button: CalculatorButton) {
+        switch button {
+        case .backspace:
+            clearCalculator()
+        case .percent:
+            if let current = Double(currentInput) {
+                currentInput = formattedNumber(current * 0.15)
+            }
+        default:
+            break
+        }
+        updateDisplay()
+    }
+
+    func clearError() {
+        errorMessage = nil
+        clearCalculator()
+    }
+
     // MARK: - Helpers
 
     @discardableResult
@@ -281,6 +440,8 @@ final class CalculatorViewModel: ObservableObject {
                 return formattedNumber(value)
             case .operator(let op):
                 return op.rawValue
+            case .parenthesis(let side):
+                return side == .left ? "(" : ")"
             }
         }
 
@@ -289,86 +450,43 @@ final class CalculatorViewModel: ObservableObject {
     }
 
     private func evaluateTokens(_ tokens: [ExpressionToken]) -> Result<Double, String> {
-        var workingTokens = tokens
+        var balance = 0
+        var components: [String] = []
 
-        for index in 0..<workingTokens.count {
-            let isEven = index % 2 == 0
-            let token = workingTokens[index]
-            if isEven, case .operator = token {
-                return .failure("Expression cannot start with an operator.")
-            }
-            if !isEven, case .number = token {
-                return .failure("Operators must be between numbers.")
-            }
-        }
-
-        if let last = workingTokens.last, case .operator = last {
-            return .failure("Expression cannot end with an operator.")
-        }
-
-        var reducedTokens: [ExpressionToken] = []
-        var index = 0
-
-        while index < workingTokens.count {
-            let token = workingTokens[index]
+        for token in tokens {
             switch token {
-            case .number:
-                reducedTokens.append(token)
-                index += 1
-            case .operator(let op) where (op == .multiply || op == .divide):
-                guard let lastNumberToken = reducedTokens.popLast(), case .number(let lhs) = lastNumberToken else {
-                    return .failure("Invalid expression structure.")
-                }
-
-                guard index + 1 < workingTokens.count, case .number(let rhs) = workingTokens[index + 1] else {
-                    return .failure("Operator must be followed by a number.")
-                }
-
-                if op == .divide && rhs == 0 {
-                    return .failure("Cannot divide by zero.")
-                }
-
-                let result = op == .multiply ? lhs * rhs : lhs / rhs
-                reducedTokens.append(.number(result))
-                index += 2
-            case .operator:
-                reducedTokens.append(token)
-                index += 1
+            case .number(let value):
+                components.append(String(value))
+            case .operator(let op):
+                components.append(op.expressionSymbol)
+            case .parenthesis(let side):
+                if side == .left { balance += 1 } else { balance -= 1 }
+                if balance < 0 { return .failure("Unbalanced parentheses.") }
+                components.append(side == .left ? "(" : ")")
             }
         }
 
-        guard let firstNumberToken = reducedTokens.first, case .number(let first) = firstNumberToken else {
-            return .failure("Invalid expression.")
-        }
+        guard balance == 0 else { return .failure("Unbalanced parentheses.") }
+        if let first = tokens.first, case .operator = first { return .failure("Expression cannot start with an operator.") }
+        if let last = tokens.last, case .operator = last { return .failure("Expression cannot end with an operator.") }
 
-        var result = first
-        index = 1
-        while index < reducedTokens.count - 1 {
-            guard case .operator(let op) = reducedTokens[index], case .number(let rhs) = reducedTokens[index + 1] else {
-                return .failure("Invalid expression.")
+        let expressionString = components.joined(separator: " ")
+        let expression = NSExpression(format: expressionString)
+        if let value = expression.expressionValue(with: nil, context: nil) as? NSNumber {
+            if value.doubleValue.isInfinite || value.doubleValue.isNaN {
+                return .failure("Result is not a number.")
             }
-
-            switch op {
-            case .add:
-                result += rhs
-            case .subtract:
-                result -= rhs
-            case .multiply, .divide:
-                break
-            }
-
-            index += 2
+            return .success(value.doubleValue)
         }
-
-        return .success(result)
+        return .failure("Unable to evaluate expression.")
     }
 
-    private func formattedNumber(_ value: Double) -> String {
+    func formattedNumber(_ value: Double) -> String {
         formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
-    private func provideHapticFeedback() {
-        let generator = UIImpactFeedbackGenerator(style: .light)
+    private func provideHapticFeedback(isError: Bool = false) {
+        let generator = UIImpactFeedbackGenerator(style: isError ? .heavy : .light)
         generator.prepare()
         generator.impactOccurred()
     }
@@ -400,6 +518,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     let expression: String
     let result: Double
     let timestamp: Date
+    var isPinned: Bool = false
 
     var formattedTimestamp: String {
         let formatter = DateFormatter()
@@ -412,6 +531,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
 struct CalculatorButtonView: View {
     let button: CalculatorButton
     let onTap: (CalculatorButton) -> Void
+    var onLongPress: ((CalculatorButton) -> Void)?
 
     @Environment(\.colorScheme) var colorScheme
 
@@ -427,6 +547,9 @@ struct CalculatorButtonView: View {
                 .minimumScaleFactor(0.8)
         }
         .contentShape(Rectangle())
+        .onLongPressGesture(minimumDuration: 0.35) {
+            onLongPress?(button)
+        }
         .accessibilityLabel(button.accessibilityLabel)
         .accessibilityHint(button.accessibilityHint)
         .accessibilityAddTraits(.isButton)
@@ -442,11 +565,14 @@ struct HistoryView: View {
     var history: [HistoryEntry]
     var onSelect: (HistoryEntry) -> Void
     var onDelete: (IndexSet) -> Void
+    var onPinToggle: (HistoryEntry) -> Void
+
+    @State private var searchText: String = ""
 
     var body: some View {
         NavigationView {
             List {
-                ForEach(history) { entry in
+                ForEach(filteredHistory) { entry in
                     Button(action: { onSelect(entry) }) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(entry.expression)
@@ -463,15 +589,40 @@ struct HistoryView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Past calculation")
                     .accessibilityHint("Tap to reuse this result")
+                    .swipeActions(edge: .trailing) {
+                        Button(entry.isPinned ? "Unpin" : "Pin") {
+                            onPinToggle(entry)
+                        }
+                        .tint(.orange)
+                    }
                 }
                 .onDelete(perform: onDelete)
             }
+            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always))
             .navigationBarTitle("History", displayMode: .inline)
             .navigationBarItems(trailing: Button("Close") {
                 presentationMode.wrappedValue.dismiss()
             }
             .accessibilityLabel("Close history")
             .accessibilityHint("Dismisses the history list"))
+        }
+    }
+
+    private var filteredHistory: [HistoryEntry] {
+        if searchText.isEmpty {
+            return history.sorted { lhs, rhs in
+                if lhs.isPinned == rhs.isPinned { return lhs.timestamp > rhs.timestamp }
+                return lhs.isPinned && !rhs.isPinned
+            }
+        }
+
+        return history.filter { entry in
+            entry.expression.localizedCaseInsensitiveContains(searchText) ||
+            entry.resultFormatted.localizedCaseInsensitiveContains(searchText)
+        }
+        .sorted { lhs, rhs in
+            if lhs.isPinned == rhs.isPinned { return lhs.timestamp > rhs.timestamp }
+            return lhs.isPinned && !rhs.isPinned
         }
     }
 }
@@ -486,14 +637,19 @@ enum CalculatorButton: Hashable {
     case toggleSign
     case percent
     case backspace
+    case parenthesis(ParenthesisSide)
+    case function(FunctionType)
+    case memory(MemoryAction)
 
-    static let allRows: [[CalculatorButton]] = [
-        [.clear, .toggleSign, .percent, .backspace],
-        [.digit(7), .digit(8), .digit(9), .op(.divide)],
-        [.digit(4), .digit(5), .digit(6), .op(.multiply)],
-        [.digit(1), .digit(2), .digit(3), .op(.subtract)],
-        [.digit(0), .dot, .history, .op(.add)],
-        [.equal]
+    static let allButtons: [CalculatorButton] = [
+        .clear, .toggleSign, .percent, .backspace,
+        .memory(.mc), .memory(.mr), .memory(.mPlus), .memory(.mMinus),
+        .function(.square), .function(.sqrt), .function(.reciprocal), .op(.divide),
+        .digit(7), .digit(8), .digit(9), .op(.multiply),
+        .digit(4), .digit(5), .digit(6), .op(.subtract),
+        .digit(1), .digit(2), .digit(3), .op(.add),
+        .digit(0), .dot, .parenthesis(.left), .parenthesis(.right),
+        .function(.sin), .function(.cos), .function(.tan), .equal
     ]
 
     var title: String {
@@ -516,6 +672,12 @@ enum CalculatorButton: Hashable {
             return "%"
         case .backspace:
             return "⌫"
+        case .parenthesis(let side):
+            return side == .left ? "(" : ")"
+        case .function(let fn):
+            return fn.title
+        case .memory(let action):
+            return action.title
         }
     }
 
@@ -539,6 +701,12 @@ enum CalculatorButton: Hashable {
             return "Percent"
         case .backspace:
             return "Delete last character"
+        case .parenthesis(let side):
+            return side == .left ? "Open parenthesis" : "Close parenthesis"
+        case .function(let fn):
+            return fn.accessibilityLabel
+        case .memory(let action):
+            return action.accessibilityLabel
         }
     }
 
@@ -560,6 +728,12 @@ enum CalculatorButton: Hashable {
             return "Converts the number to a percent"
         case .backspace:
             return "Removes the last digit"
+        case .parenthesis:
+            return "Adds a parenthesis to the expression"
+        case .function:
+            return "Applies a scientific function"
+        case .memory:
+            return "Memory controls"
         }
     }
 }
@@ -569,6 +743,15 @@ enum OperatorType: String {
     case subtract = "-"
     case multiply = "×"
     case divide = "÷"
+
+    var expressionSymbol: String {
+        switch self {
+        case .add: return "+"
+        case .subtract: return "-"
+        case .multiply: return "*"
+        case .divide: return "/"
+        }
+    }
 
     var accessibilityLabel: String {
         switch self {
@@ -587,6 +770,7 @@ enum OperatorType: String {
 enum ExpressionToken: Equatable {
     case number(Double)
     case `operator`(OperatorType)
+    case parenthesis(ParenthesisSide)
 }
 
 private extension Array where Element == ExpressionToken {
@@ -605,6 +789,13 @@ private extension Array where Element == ExpressionToken {
     }
 }
 
+private extension ExpressionToken {
+    var isLeftParenthesis: Bool {
+        if case .parenthesis(.left) = self { return true }
+        return false
+    }
+}
+
 extension HistoryEntry {
     var resultFormatted: String {
         let formatter = NumberFormatter()
@@ -613,6 +804,70 @@ extension HistoryEntry {
         formatter.maximumFractionDigits = 8
         formatter.minimumFractionDigits = 0
         return formatter.string(from: NSNumber(value: result)) ?? String(result)
+    }
+}
+
+enum ParenthesisSide { case left, right }
+
+enum FunctionType: CaseIterable {
+    case sin, cos, tan, sqrt, square, reciprocal
+
+    var title: String {
+        switch self {
+        case .sin: return "sin"
+        case .cos: return "cos"
+        case .tan: return "tan"
+        case .sqrt: return "√"
+        case .square: return "x²"
+        case .reciprocal: return "1/x"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .sin: return "Sine"
+        case .cos: return "Cosine"
+        case .tan: return "Tangent"
+        case .sqrt: return "Square root"
+        case .square: return "Square"
+        case .reciprocal: return "Reciprocal"
+        }
+    }
+}
+
+enum MemoryAction: CaseIterable {
+    case mc, mr, mPlus, mMinus
+
+    var title: String {
+        switch self {
+        case .mc: return "MC"
+        case .mr: return "MR"
+        case .mPlus: return "M+"
+        case .mMinus: return "M-"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .mc: return "Memory clear"
+        case .mr: return "Memory recall"
+        case .mPlus: return "Add to memory"
+        case .mMinus: return "Subtract from memory"
+        }
+    }
+}
+
+enum ThemeOption: String, CaseIterable {
+    case classic, ocean, forest
+
+    var title: String { rawValue.capitalized }
+
+    var accentColor: Color {
+        switch self {
+        case .classic: return .orange
+        case .ocean: return .blue
+        case .forest: return .green
+        }
     }
 }
 
